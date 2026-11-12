@@ -1,1 +1,11 @@
-History.txt
+# Riwayat minum pribadi
+@Resources/History.txt
+
+# Font berlisensi (mis. OnePlus Sans) - pengguna memasang sendiri
+@Resources/Fonts/*
+!@Resources/Fonts/.gitkeep
+
+# Paket hasil build, diunggah lewat GitHub Releases
+*.rmskin
+
+CLAUDE.md

@@ -7,6 +7,13 @@ local DAYS = {'Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'}
 
 local file, data, today, selected, viewY, viewM, started, calOpen
 
+-- Pengingat
+local remMin, actStart, actEnd, notif     -- dari Variables.inc
+local loadTs = os.time()                  -- waktu skin dimuat
+local quietUntil = 0                      -- jangan mengingatkan sebelum waktu ini
+local alerting = false
+local SNOOZE = 15 * 60
+
 local function ymd(y, m, d) return string.format('%04d-%02d-%02d', y, m, d) end
 
 local function parseDate(s)
@@ -73,11 +80,116 @@ local function Change(d, delta)
   end
 end
 
+-- ===== Pengingat =====
+
+local function ReadSettings()
+  remMin   = num(SKIN:GetVariable('ReminderMin'), 120)
+  actStart = num(SKIN:GetVariable('ActiveStart'), 7)
+  actEnd   = num(SKIN:GetVariable('ActiveEnd'), 22)
+  notif    = num(SKIN:GetVariable('ReminderNotif'), 1)
+end
+
+local function todayAt(h, m)
+  local t = os.date('*t')
+  t.hour, t.min, t.sec = h, m or 0, 0
+  return os.time(t)
+end
+
+local function lastDrinkTs()
+  local tm = Get(today).times[#Get(today).times]
+  if tm then
+    local h, m = tm:match('(%d+):(%d+)')
+    if h then return todayAt(tonumber(h), tonumber(m)) end
+  end
+end
+
+local function hhmm(ts) return os.date('%H:%M', ts) end
+
+local function durText(sec)
+  local mins = math.floor(sec / 60)
+  local h, m = math.floor(mins / 60), mins % 60
+  if h > 0 and m > 0 then return h .. ' jam ' .. m .. ' mnt' end
+  if h > 0 then return h .. ' jam' end
+  return m .. ' mnt'
+end
+
+-- Waktu pengingat berikutnya (nil kalau pengingat mati atau di luar jam aktif hari ini)
+local function nextDue()
+  if remMin <= 0 then return nil end
+  local base = lastDrinkTs() or math.max(loadTs, todayAt(actStart))
+  local due = math.max(base + remMin * 60, quietUntil, todayAt(actStart))
+  if due >= todayAt(math.min(actEnd, 24)) then return nil end
+  return due
+end
+
+local function targetReached()
+  return Get(today).count >= num(SKIN:GetVariable('Target'), 8)
+end
+
+local function Alert(test)
+  local now = os.time()
+  local e = Get(today)
+  local last = lastDrinkTs()
+  local short, long, banner
+  if last then
+    local mins = math.floor((now - last) / 60)
+    short = 'Sudah ' .. durText(now - last) .. ' belum minum'
+    -- versi ringkas untuk banner yang sempit, mis. "1j 23m"
+    local h, m = math.floor(mins / 60), mins % 60
+    banner = 'Waktunya minum  -  ' .. (h > 0 and (h .. 'j ') or '') .. m .. 'm lalu'
+  else
+    short = 'Belum minum hari ini'
+    banner = 'Waktunya minum  -  belum minum'
+  end
+  long = short .. '. Hari ini baru ' .. e.count .. ' dari ' .. SKIN:GetVariable('Target') .. ' gelas.'
+
+  alerting = true
+  bang('!SetVariable', 'Alert', 1)
+  bang('!SetVariable', 'AlertText', banner)
+  if notif == 1 then
+    bang('!SetVariable', 'ToastTitle', test and 'Tes pengingat minum' or 'Waktunya minum air')
+    bang('!SetVariable', 'ToastMsg', long)
+    bang('!UpdateMeasure', 'MeasureToast')
+    bang('!CommandMeasure', 'MeasureToast', 'Run')
+  end
+end
+
+local function ClearAlert()
+  alerting = false
+  bang('!SetVariable', 'Alert', 0)
+end
+
+local function CheckReminder()
+  if remMin <= 0 or targetReached() then
+    if alerting then ClearAlert() end
+    return false
+  end
+  local due = nextDue()
+  local now = os.time()
+  local h = tonumber(os.date('%H'))
+  if due and now >= due and h >= actStart and h < actEnd then
+    quietUntil = now + remMin * 60   -- ulangi lagi setelah satu interval kalau tetap belum minum
+    Alert(false)
+    return true
+  end
+  return false
+end
+
 -- Kirim nilai hari ini ke variabel skin
 local function Push()
   local e = Get(today)
   bang('!SetVariable', 'Count', e.count)
   bang('!SetVariable', 'LastTime', e.times[#e.times] or '-')
+
+  local info = 'Terakhir ' .. (e.times[#e.times] or '-')
+  local due = nextDue()
+  if remMin > 0 and not targetReached() and due then
+    info = info .. '  -  ingat ' .. hhmm(due)
+  end
+  bang('!SetVariable', 'InfoLeft', info)
+  -- Lonceng abu-abu; ikonnya redup saat pengingat mati
+  bang('!SetVariable', 'BellFill', SKIN:GetVariable('ColorButton2'))
+  bang('!SetVariable', 'BellIcon', remMin > 0 and SKIN:GetVariable('ColorText') or SKIN:GetVariable('ColorDim'))
   bang('!SetVariable', 'Previous', Get(offsetDate(today, -1)).count)
   if calOpen == 1 then
     bang('!SetVariable', 'CalFill', SKIN:GetVariable('Accent'))
@@ -178,7 +290,9 @@ local function Draw()
 end
 
 local function Commit(d)
-  Save(); Push(); Draw()
+  Save()
+  if alerting then ClearAlert() end
+  Push(); Draw()
 end
 
 -- ===== Dipanggil dari skin =====
@@ -191,6 +305,7 @@ function Initialize()
   local t = os.date('*t')
   viewY, viewM = t.year, t.month
   calOpen = num(SKIN:GetVariable('CalOpen'), 0)
+  ReadSettings()
   started = false
 end
 
@@ -201,12 +316,46 @@ function Update()
       local t = os.date('*t')
       viewY, viewM = t.year, t.month
       if selected == today then selected = now end
+      quietUntil = 0
+      if alerting then ClearAlert() end
     end
     started = true
     today = now
     Push(); Draw()
+  elseif CheckReminder() then
+    Push()
+    bang('!UpdateMeter', '*')
+    bang('!Redraw')
   end
   return Get(today).count
+end
+
+-- Tombol di banner pengingat
+function Snooze()
+  quietUntil = os.time() + SNOOZE
+  ClearAlert(); Push(); Draw()
+end
+
+function Dismiss()
+  ClearAlert(); Push(); Draw()
+end
+
+function TestAlert()
+  Alert(true); Push(); Draw()
+end
+
+-- Dipanggil dialog pengaturan setelah mengubah nilai
+function ReloadSettings()
+  ReadSettings()
+  quietUntil = 0
+  if alerting and remMin <= 0 then ClearAlert() end
+  Push(); Draw()
+end
+
+function OpenSettings()
+  local cfg = 'WaterTracker\\Settings'
+  bang('!ActivateConfig', cfg, 'Settings.ini')
+  bang('!Move', SKIN:GetX() + SKIN:GetW() + 12, SKIN:GetY(), cfg)
 end
 
 function AddToday() Change(today, 1); Commit() end
